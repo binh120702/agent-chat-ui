@@ -45,6 +45,7 @@ import {
   ArtifactTitle,
   useArtifactContext,
 } from "./artifact";
+import KnowledgeGraphPanel from "./knowledge-graph/KnowledgeGraphPanel";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -116,6 +117,10 @@ export function Thread() {
   const [artifactOpen, closeArtifact] = useArtifactOpen();
 
   const [threadId, _setThreadId] = useQueryState("threadId");
+  const [kbGraphOpen, setKbGraphOpen] = useQueryState(
+    "kbGraphOpen",
+    parseAsBoolean.withDefault(false),
+  );
   const [chatHistoryOpen, setChatHistoryOpen] = useQueryState(
     "chatHistoryOpen",
     parseAsBoolean.withDefault(false),
@@ -141,8 +146,14 @@ export function Thread() {
   const stream = useStreamContext();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
+  const lastMessageType = messages.length ? messages[messages.length - 1]?.type : null;
 
   const lastError = useRef<string | undefined>(undefined);
+  const [kbGraphRefreshToken, setKbGraphRefreshToken] = useState(0);
+  const prevIsLoadingRef = useRef(isLoading);
+  const [kbGraphAutoOpened, setKbGraphAutoOpened] = useState(false);
+  const [rightPanelWidth, setRightPanelWidth] = useState(520);
+  const [isResizingPanel, setIsResizingPanel] = useState(false);
 
   const setThreadId = (id: string | null) => {
     _setThreadId(id);
@@ -150,7 +161,12 @@ export function Thread() {
     // close artifact and reset artifact context
     closeArtifact();
     setArtifactContext({});
+
+    // reset KB graph auto-open state so it can react to new investigation.
+    setKbGraphAutoOpened(false);
+    setKbGraphRefreshToken(0);
   };
+
 
   useEffect(() => {
     if (!stream.error) {
@@ -179,6 +195,84 @@ export function Thread() {
       // no-op
     }
   }, [stream.error]);
+
+  useEffect(() => {
+    // When an AI response finishes (stream flips from loading -> not loading),
+    // refresh the knowledge graph if it's open and we're not currently showing an artifact.
+    if (
+      prevIsLoadingRef.current &&
+      !isLoading &&
+      kbGraphOpen &&
+      !artifactOpen &&
+      messages.length > 0 &&
+      lastMessageType === "ai"
+    ) {
+      setKbGraphRefreshToken((t) => t + 1);
+    }
+    prevIsLoadingRef.current = isLoading;
+  }, [artifactOpen, isLoading, kbGraphOpen, messages.length, lastMessageType]);
+
+  useEffect(() => {
+    if (
+      kbGraphAutoOpened ||
+      kbGraphOpen ||
+      artifactOpen ||
+      isLoading ||
+      lastMessageType !== "ai"
+    ) {
+      return;
+    }
+
+    // Auto-open the graph panel after the first completed AI response
+    // (assuming the KB has at least one saved edge).
+    const maybeOpen = async () => {
+      try {
+        const query = new URLSearchParams({ limit: "1" });
+        if (threadId) {
+          query.set("threadId", threadId);
+        }
+        const res = await fetch(`/api/kb-graph?${query.toString()}`);
+        if (!res.ok) return;
+        const data = (await res.json()) as { edgeCount?: number };
+        if ((data.edgeCount ?? 0) > 0) {
+          setKbGraphOpen(true);
+          setKbGraphAutoOpened(true);
+        }
+      } catch {
+        // no-op
+      }
+    };
+
+    void maybeOpen();
+  }, [
+    artifactOpen,
+    kbGraphAutoOpened,
+    kbGraphOpen,
+    isLoading,
+    lastMessageType,
+    setKbGraphOpen,
+    threadId,
+  ]);
+
+  useEffect(() => {
+    if (!isResizingPanel) return;
+
+    const onMouseMove = (e: MouseEvent) => {
+      // Right panel starts from the right edge, so width is viewport - pointer X.
+      const next = window.innerWidth - e.clientX;
+      const clamped = Math.max(320, Math.min(900, next));
+      setRightPanelWidth(clamped);
+    };
+
+    const onMouseUp = () => setIsResizingPanel(false);
+
+    window.addEventListener("mousemove", onMouseMove);
+    window.addEventListener("mouseup", onMouseUp);
+    return () => {
+      window.removeEventListener("mousemove", onMouseMove);
+      window.removeEventListener("mouseup", onMouseUp);
+    };
+  }, [isResizingPanel]);
 
   // TODO: this should be part of the useStream hook
   const prevMessageLength = useRef(0);
@@ -213,20 +307,25 @@ export function Thread() {
 
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
+    const mergedContext = {
+      ...(context ?? {}),
+      thread_id: threadId ?? "",
+    };
+
+    const outgoingMessages = [...toolMessages, newHumanMessage];
 
     stream.submit(
-      { messages: [...toolMessages, newHumanMessage], context },
+      { messages: outgoingMessages, context: mergedContext },
       {
         streamMode: ["values"],
         streamSubgraphs: true,
         streamResumable: true,
         optimisticValues: (prev) => ({
           ...prev,
-          context,
+          context: mergedContext,
           messages: [
             ...(prev.messages ?? []),
-            ...toolMessages,
-            newHumanMessage,
+            ...outgoingMessages,
           ],
         }),
       },
@@ -254,6 +353,7 @@ export function Thread() {
   const hasNoAIOrToolMessages = !messages.find(
     (m) => m.type === "ai" || m.type === "tool",
   );
+  const rightPanelOpen = artifactOpen || kbGraphOpen;
 
   return (
     <div className="flex h-screen w-full overflow-hidden">
@@ -284,9 +384,10 @@ export function Thread() {
 
       <div
         className={cn(
-          "grid w-full grid-cols-[1fr_0fr] transition-all duration-500",
-          artifactOpen && "grid-cols-[3fr_2fr]",
+          "grid w-full transition-all duration-300",
+          rightPanelOpen ? "grid-cols-[1fr_auto]" : "grid-cols-[1fr_0fr]",
         )}
+        style={rightPanelOpen ? { gridTemplateColumns: `1fr ${rightPanelWidth}px` } : undefined}
       >
         <motion.div
           className={cn(
@@ -383,6 +484,20 @@ export function Thread() {
                 >
                   <SquarePen className="size-5" />
                 </TooltipIconButton>
+
+                  <TooltipIconButton
+                    size="lg"
+                    className="p-4"
+                    tooltip={kbGraphOpen ? "Hide knowledge graph" : "Show knowledge graph"}
+                    variant="ghost"
+                    onClick={() => setKbGraphOpen((p) => !p)}
+                  >
+                    {kbGraphOpen ? (
+                      <PanelRightClose className="size-5" />
+                    ) : (
+                      <PanelRightOpen className="size-5" />
+                    )}
+                  </TooltipIconButton>
               </div>
 
               <div className="from-background to-background/0 absolute inset-x-0 top-full h-5 bg-gradient-to-b" />
@@ -546,17 +661,38 @@ export function Thread() {
           </StickToBottom>
         </motion.div>
         <div className="relative flex flex-col border-l">
+          {kbGraphOpen && !artifactOpen ? (
+            <div
+              role="separator"
+              aria-label="Resize knowledge graph panel"
+              className="absolute top-0 left-0 z-20 h-full w-2 -translate-x-1/2 cursor-col-resize bg-transparent"
+              onMouseDown={(e) => {
+                e.preventDefault();
+                setIsResizingPanel(true);
+              }}
+            />
+          ) : null}
           <div className="absolute inset-0 flex min-w-[30vw] flex-col">
-            <div className="grid grid-cols-[1fr_auto] border-b p-4">
-              <ArtifactTitle className="truncate overflow-hidden" />
-              <button
-                onClick={closeArtifact}
-                className="cursor-pointer"
-              >
-                <XIcon className="size-5" />
-              </button>
-            </div>
-            <ArtifactContent className="relative flex-grow" />
+            {artifactOpen ? (
+              <>
+                <div className="grid grid-cols-[1fr_auto] border-b p-4">
+                  <ArtifactTitle className="truncate overflow-hidden" />
+                  <button
+                    onClick={closeArtifact}
+                    className="cursor-pointer"
+                  >
+                    <XIcon className="size-5" />
+                  </button>
+                </div>
+                <ArtifactContent className="relative flex-grow" />
+              </>
+            ) : kbGraphOpen ? (
+              <KnowledgeGraphPanel
+                onClose={() => setKbGraphOpen(false)}
+                refreshToken={kbGraphRefreshToken}
+                threadId={threadId}
+              />
+            ) : null}
           </div>
         </div>
       </div>
