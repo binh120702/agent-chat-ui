@@ -15,6 +15,7 @@ import { createClient } from "./client";
 
 interface ThreadContextType {
   getThreads: () => Promise<Thread[]>;
+  createThread: () => Promise<Thread | null>;
   threads: Thread[];
   setThreads: Dispatch<SetStateAction<Thread[]>>;
   threadsLoading: boolean;
@@ -53,8 +54,20 @@ export function ThreadProvider({ children }: { children: ReactNode }) {
     return threads;
   }, [apiUrl, assistantId]);
 
+  const createThread = useCallback(async (): Promise<Thread | null> => {
+    if (!apiUrl || !assistantId) return null;
+    const client = createClient(apiUrl, getApiKey() ?? undefined);
+    const thread = await client.threads.create({
+      metadata: {
+        ...getThreadSearchMetadata(assistantId),
+      },
+    });
+    return thread;
+  }, [apiUrl, assistantId]);
+
   const value = {
     getThreads,
+    createThread,
     threads,
     setThreads,
     threadsLoading,

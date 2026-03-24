@@ -46,6 +46,7 @@ import {
   useArtifactContext,
 } from "./artifact";
 import KnowledgeGraphPanel from "./knowledge-graph/KnowledgeGraphPanel";
+import { useThreads } from "@/providers/Thread";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -144,6 +145,7 @@ export function Thread() {
   const isLargeScreen = useMediaQuery("(min-width: 1024px)");
 
   const stream = useStreamContext();
+  const { createThread } = useThreads();
   const messages = stream.messages;
   const isLoading = stream.isLoading;
   const lastMessageType = messages.length ? messages[messages.length - 1]?.type : null;
@@ -154,6 +156,7 @@ export function Thread() {
   const [kbGraphAutoOpened, setKbGraphAutoOpened] = useState(false);
   const [rightPanelWidth, setRightPanelWidth] = useState(520);
   const [isResizingPanel, setIsResizingPanel] = useState(false);
+  const [isCreatingThread, setIsCreatingThread] = useState(false);
 
   const setThreadId = (id: string | null) => {
     _setThreadId(id);
@@ -165,6 +168,39 @@ export function Thread() {
     // reset KB graph auto-open state so it can react to new investigation.
     setKbGraphAutoOpened(false);
     setKbGraphRefreshToken(0);
+  };
+
+  const createAndSelectNewThread = async () => {
+    if (isCreatingThread || isLoading) return;
+    setIsCreatingThread(true);
+    setThreadId(null);
+    try {
+      const createdThread = await createThread();
+      const createdThreadObj = createdThread as Record<string, unknown> | null;
+      const createdId =
+        (createdThreadObj?.thread_id as string | undefined) ??
+        (createdThreadObj?.threadId as string | undefined) ??
+        (createdThreadObj?.id as string | undefined) ??
+        "";
+      if (!createdId) {
+        throw new Error("Thread was created but no thread id was returned.");
+      }
+      setThreadId(createdId);
+    } catch (error) {
+      const message =
+        error instanceof Error ? error.message : "Failed to create thread.";
+      toast.error("Could not create thread", {
+        description: (
+          <p>
+            <strong>Error:</strong> <code>{message}</code>
+          </p>
+        ),
+        richColors: true,
+        closeButton: true,
+      });
+    } finally {
+      setIsCreatingThread(false);
+    }
   };
 
 
@@ -288,8 +324,9 @@ export function Thread() {
     prevMessageLength.current = messages.length;
   }, [messages]);
 
-  const handleSubmit = (e: FormEvent) => {
+  const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (isCreatingThread) return;
     if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading)
       return;
     setFirstTokenReceived(false);
@@ -305,11 +342,41 @@ export function Thread() {
 
     const toolMessages = ensureToolCallsHaveResponses(stream.messages);
 
+    let resolvedThreadId = threadId ?? "";
+    if (!resolvedThreadId) {
+      try {
+        const createdThread = await createThread();
+        const createdThreadObj = createdThread as Record<string, unknown> | null;
+        const createdId =
+          (createdThreadObj?.thread_id as string | undefined) ??
+          (createdThreadObj?.threadId as string | undefined) ??
+          (createdThreadObj?.id as string | undefined) ??
+          "";
+        if (!createdId) {
+          throw new Error("Thread was created but no thread id was returned.");
+        }
+        resolvedThreadId = createdId;
+      } catch (error) {
+        const message =
+          error instanceof Error ? error.message : "Failed to create thread.";
+        toast.error("Could not create thread", {
+          description: (
+            <p>
+              <strong>Error:</strong> <code>{message}</code>
+            </p>
+          ),
+          richColors: true,
+          closeButton: true,
+        });
+        return;
+      }
+    }
+
     const context =
       Object.keys(artifactContext).length > 0 ? artifactContext : undefined;
     const mergedContext = {
       ...(context ?? {}),
-      thread_id: threadId ?? "",
+      thread_id: resolvedThreadId,
     };
 
     const outgoingMessages = [...toolMessages, newHumanMessage];
@@ -451,7 +518,9 @@ export function Thread() {
                 </div>
                 <motion.button
                   className="flex cursor-pointer items-center gap-2"
-                  onClick={() => setThreadId(null)}
+                  onClick={() => {
+                    void createAndSelectNewThread();
+                  }}
                   animate={{
                     marginLeft: !chatHistoryOpen ? 48 : 0,
                   }}
@@ -478,11 +547,18 @@ export function Thread() {
                 <TooltipIconButton
                   size="lg"
                   className="p-4"
-                  tooltip="New thread"
+                  tooltip={isCreatingThread ? "Creating thread..." : "New thread"}
                   variant="ghost"
-                  onClick={() => setThreadId(null)}
+                  onClick={() => {
+                    void createAndSelectNewThread();
+                  }}
+                  disabled={isCreatingThread || isLoading}
                 >
-                  <SquarePen className="size-5" />
+                  {isCreatingThread ? (
+                    <LoaderCircle className="size-5 animate-spin" />
+                  ) : (
+                    <SquarePen className="size-5" />
+                  )}
                 </TooltipIconButton>
 
                   <TooltipIconButton
@@ -645,11 +721,12 @@ export function Thread() {
                             type="submit"
                             className="ml-auto shadow-md transition-all"
                             disabled={
+                              isCreatingThread ||
                               isLoading ||
                               (!input.trim() && contentBlocks.length === 0)
                             }
                           >
-                            Send
+                            {isCreatingThread ? "Preparing thread..." : "Send"}
                           </Button>
                         )}
                       </div>
