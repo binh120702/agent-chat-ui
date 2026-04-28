@@ -47,6 +47,7 @@ import {
 } from "./artifact";
 import KnowledgeGraphPanel from "./knowledge-graph/KnowledgeGraphPanel";
 import { useThreads } from "@/providers/Thread";
+import { getContentString } from "./utils";
 
 function StickyToBottomContent(props: {
   content: ReactNode;
@@ -329,14 +330,36 @@ export function Thread() {
     if (isCreatingThread) return;
     if ((input.trim().length === 0 && contentBlocks.length === 0) || isLoading)
       return;
+    await submitHumanMessage({
+      text: input,
+      includePendingBlocks: true,
+    });
+
+    setInput("");
+    setContentBlocks([]);
+  };
+
+  const submitHumanMessage = async ({
+    text,
+    includePendingBlocks,
+  }: {
+    text: string;
+    includePendingBlocks: boolean;
+  }) => {
+    if (isCreatingThread || isLoading) return;
+
+    const trimmed = text.trim();
+    const blocks = includePendingBlocks ? contentBlocks : [];
+    if (!trimmed && blocks.length === 0) return;
+
     setFirstTokenReceived(false);
 
     const newHumanMessage: Message = {
       id: uuidv4(),
       type: "human",
       content: [
-        ...(input.trim().length > 0 ? [{ type: "text", text: input }] : []),
-        ...contentBlocks,
+        ...(trimmed.length > 0 ? [{ type: "text", text: trimmed }] : []),
+        ...blocks,
       ] as Message["content"],
     };
 
@@ -356,6 +379,7 @@ export function Thread() {
           throw new Error("Thread was created but no thread id was returned.");
         }
         resolvedThreadId = createdId;
+        setThreadId(createdId);
       } catch (error) {
         const message =
           error instanceof Error ? error.message : "Failed to create thread.";
@@ -397,9 +421,80 @@ export function Thread() {
         }),
       },
     );
+  };
 
-    setInput("");
-    setContentBlocks([]);
+  const handleContinueInvestigation = () => {
+    // Intentionally lightweight: this is the HITL “continue” decision.
+    // Users can type a next instruction, or just keep going with another message.
+    const el = document.querySelector("textarea") as HTMLTextAreaElement | null;
+    el?.focus();
+  };
+
+  const handleGenerateReport = async () => {
+    await submitHumanMessage({
+      text:
+        "Generate the final report now.\n\n" +
+        "- Use the knowledge base and knowledge graph as the source of truth.\n" +
+        "- Include key findings, evidence links, and clearly labeled assumptions.\n" +
+        "- If something is missing, list follow-up questions at the end.",
+      includePendingBlocks: false,
+    });
+  };
+
+  const handleStop = async () => {
+    if (isLoading) {
+      stream.stop();
+      return;
+    }
+    await createAndSelectNewThread();
+  };
+
+  const getLastAiText = (): string => {
+    const lastAi = [...messages].reverse().find((m) => m.type === "ai");
+    if (!lastAi) return "";
+    return getContentString(lastAi.content ?? []);
+  };
+
+  const handleExportLastAi = async () => {
+    const text = getLastAiText();
+    if (!text.trim()) {
+      toast.error("Nothing to export", {
+        description: "No assistant response found to export yet.",
+        richColors: true,
+        closeButton: true,
+      });
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(text);
+      toast("Copied to clipboard", { duration: 2500 });
+    } catch {
+      // ignore clipboard errors; download will still work
+    }
+
+    try {
+      const blob = new Blob([text], { type: "text/markdown;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `osint-report-${(threadId ?? "thread").slice(0, 8)}.md`;
+      document.body.appendChild(a);
+      a.click();
+      a.remove();
+      URL.revokeObjectURL(url);
+    } catch (e) {
+      const message = e instanceof Error ? e.message : "Failed to export report.";
+      toast.error("Export failed", {
+        description: (
+          <p>
+            <strong>Error:</strong> <code>{message}</code>
+          </p>
+        ),
+        richColors: true,
+        closeButton: true,
+      });
+    }
   };
 
   const handleRegenerate = (
@@ -707,11 +802,46 @@ export function Thread() {
                           accept="image/jpeg,image/png,image/gif,image/webp,application/pdf"
                           className="hidden"
                         />
+                        {chatStarted && !stream.isLoading && (
+                          <div className="ml-auto flex items-center gap-2">
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={handleContinueInvestigation}
+                            >
+                              Continue
+                            </Button>
+                            <Button
+                              type="button"
+                              variant="secondary"
+                              onClick={() => void handleGenerateReport()}
+                              disabled={!threadId && messages.length === 0}
+                            >
+                              Generate report
+                            </Button>
+                            {lastMessageType === "ai" && (
+                              <Button
+                                type="button"
+                                variant="outline"
+                                onClick={() => void handleExportLastAi()}
+                              >
+                                Export
+                              </Button>
+                            )}
+                            <Button
+                              type="button"
+                              variant="outline"
+                              onClick={() => void handleStop()}
+                            >
+                              Stop
+                            </Button>
+                          </div>
+                        )}
                         {stream.isLoading ? (
                           <Button
                             key="stop"
                             onClick={() => stream.stop()}
-                            className="ml-auto"
+                            className={chatStarted ? "" : "ml-auto"}
                           >
                             <LoaderCircle className="h-4 w-4 animate-spin" />
                             Cancel
@@ -719,7 +849,7 @@ export function Thread() {
                         ) : (
                           <Button
                             type="submit"
-                            className="ml-auto shadow-md transition-all"
+                            className={chatStarted ? "shadow-md transition-all" : "ml-auto shadow-md transition-all"}
                             disabled={
                               isCreatingThread ||
                               isLoading ||
